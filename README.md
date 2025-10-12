@@ -28,3 +28,6 @@ The program reads the **config.txt** file, executes the printing variant and div
 
 ## Developed by: 
 - James Archer B. Paguiligan
+
+## Demo video link: 
+- https://drive.google.com/file/d/1oCLqifsxuJdq_07thpsHAlY-XsqmT2Xl/view?usp=sharing

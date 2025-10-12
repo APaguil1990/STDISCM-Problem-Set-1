@@ -25,3 +25,6 @@ Edit **config.txt** with:
 - **Division Scheme=B1** (B1=range division, B2=divisibility testing)
 
 The program reads the **config.txt** file, executes the printing variant and division scheme, and outputs the prime values with the thread IDs and timestamps. 
+
+## Developed by: 
+- James Archer B. Paguiligan

@@ -14,7 +14,7 @@ Showcase the impact of concurrency strategies on primality checking throughput b
 Each run reports primes along with **thread IDs** and **timestamps** to visualize scheduling and throughput. 
 
 ## Quick Start 
-- Compile: **g++ -std=c++20 -O3 -pthread prime_check.cpp -o prime_checker.exe
+- Compile: **g++ -std=c++20 -O3 -pthread prime_check.cpp -o prime_checker.exe**
 - Run: Create **config.txt** then execute **prime_checker**
 
 ## Configuration 

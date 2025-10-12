@@ -1,0 +1,4 @@
+Threads= 20
+Max Value= 2^8
+Printing Variant= A2
+Division Scheme= B2

@@ -185,7 +185,7 @@ void search_primes_b2(uint64_t max_value, int num_threads, int thread_id, const 
 
             if (printing_variant == "A1") {
                 std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "Thread " << thread_id 
+                std::cout << "Thread " << std::setw(2) << thread_id 
                           << " | Prime: " << std::setw(8) << n 
                           << " | Time: " << format_timestamp(timestamp) << std::endl;
             } else {
@@ -202,10 +202,10 @@ void search_primes_b2(uint64_t max_value, int num_threads, int thread_id, const 
     auto thread_end = std::chrono::system_clock::now();
     
     std::lock_guard<std::mutex> lock(cout_mutex);
-    std::cout << "Thread " << thread_id << " finished at: " << format_timestamp(thread_end)
+    std::cout << "Thread " << std::setw(2) << thread_id << " finished at: " << format_timestamp(thread_end)
               << " (Processed: " << numbers_processed << " numbers, Found: " << primes_found
               << " primes)" << std::endl;
-}
+} 
 
 // A1-B1: Immediate printing with straight division
 void run_a1_b1(const Config& config) {

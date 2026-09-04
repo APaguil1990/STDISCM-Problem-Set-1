@@ -734,6 +734,227 @@ public:
     }
 };
 
-}; // namespace
+// Factory selects the requested workload strategy at runtime.
+std::unique_ptr<WorkDivisionStrategy> make_strategy(DivisionScheme scheme) {
+    if (scheme == DivisionScheme::Range) {
+        return std::make_unique<RangeDivisionStrategy>();
+    } 
+
+    return std::make_unique<DivisibilityDivisionStrategy>();
+}
+
+} // namespace
+
+ConfigError::ConfigError(Kind kind, const std::string& message) : std::runtime_error(message), kind_(kind) {}
+ConfigError::Kind 
+ConfigError::kind() const noexcept {
+    return kind_;
+}
+
+// Returns the combined experiment name such as A1-B1 or A2-B2.
+std::string Config::variant_name() const {
+    const std::string printing = (printing_variant == PrintingVariant::Immediate) ? "A1" : "A2"; 
+    const std::string division = (division_scheme == DivisionScheme::Range) ? "B1" : "B2";
+
+    return printing + '-' + division;
+}
+
+// Reads, validates, and constructs a complete Config object. 
+Config ConfigLoader::load_from_file(const std::string& filename) {
+    std::ifstream file(filename); 
+
+    if (!file.is_open()) {
+        throw ConfigError(
+            ConfigError::Kind::InvalidConfiguration, 
+            "Cannot open configuration file: " + filename
+        );
+    }
+
+    // Store raw values first so Config is created only after full validation. 
+    std::optional<std::string> threads_text;
+    std::optional<std::string> max_value_text; 
+    std::optional<std::string> printing_text; 
+    std::optional<std::string> division_text; 
+    std::optional<std::string> verbose_text; 
+
+    // Used to reject duplicate configuration keys. 
+    std::unordered_set<std::string> seen_keys; 
+    std::vector<std::string> deferred_errors; 
+    std::string line; 
+    std::size_t line_number = 0;
+
+    while (std::getline(file, line)) {
+        line_number++;
+        line = trim(line); 
+
+        // Ignore blank lines and full-line comments.
+        if (line.empty() || line.front() == '#') {
+            continue;
+        } 
+
+        const auto equals = line.find('='); 
+
+        if (equals == std::string::npos) {
+            deferred_errors.push_back(
+                "Line " + std::to_string(line_number) + 
+                " is missing '=': " + line 
+            );
+
+            continue;
+        }
+
+        const std::string key = trim(
+            line.substr(0, equals)
+        );
+
+        const std::string value = trim(
+            line.substr(equals + 1)
+        );
+
+        if (key.empty()) {
+            deferred_errors.push_back(
+                "Line " + std::to_string(line_number) + " has an empty configuration key."
+            ); 
+
+            continue;
+        }
+
+        // Reject duplicates rather than silently overriding an earlier setting. 
+        if (!seen_keys.insert(key).second) {
+            deferred_errors.push_back("Duplicate configuration key: " + key);
+            continue;
+        } 
+
+        if (key == "Threads") {
+            threads_text = value;
+        } else if (key == "Max Value") {
+            max_value_text = value;
+        } else if (key == "Printing Variant") {
+            printing_text = value;
+        } else if (key == "Division Scheme") {
+            division_text = value; 
+        } else if (key == "Verbose Divisibility") {
+            verbose_text = value;
+        } else {
+            // Unknown keys are errors to help detect configuration typos. 
+            deferred_errors.push_back(
+                "Unknown configuration key: " + key
+            );
+        }
+    }
+
+    // Check required fields before reporting other parsing problems. 
+    std::vector<std::string> missing;
+
+    if (!threads_text) {
+        missing.emplace_back("Threads");
+    } 
+
+    if (!max_value_text) {
+        missing.emplace_back("Max Value");
+    } 
+
+    if (!printing_text) {
+        missing.emplace_back("Printing Variant");
+    }
+
+    if (!division_text) {
+        missing.emplace_back("Division Scheme");
+    }
+
+    if (!missing.empty()) {
+        std::ostringstream message; 
+        message << "Missing required configuration: ";
+
+        for (std::size_t i = 0; i < missing.size(); i++) {
+            if (i != 0) {
+                message << ", ";
+            } 
+
+            message << missing[i];
+        } 
+
+        throw ConfigError(
+            ConfigError::Kind::MissingRequiredField, 
+            message.str()
+        );
+    }
+
+    // Report malformed, duplicate, or unknown settings after required-key checks. 
+    if (!deferred_errors.empty()) {
+        std::ostringstream message; 
+
+        for (std::size_t i = 0; i < deferred_errors.size(); i++) {
+            if (i != 0) {
+                message << " | ";
+            } 
+
+            message << deferred_errors[i];
+        }
+
+        throw ConfigError(
+            ConfigError::Kind::InvalidConfiguration,
+            message.str()
+        );
+    }
+
+    const std::uint64_t parsed_threads = parse_unsigned_decimal(*threads_text, "Threads");
+
+    if (parsed_threads == 0) {
+        throw ConfigError(
+            ConfigError::Kind::InvalidConfiguration, 
+            "Threads must be greater than 0."
+        );
+    } 
+
+    if (parsed_threads > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        throw ConfigError(
+            ConfigError::Kind::InvalidConfiguration, 
+            "Thread is too large for this platform."
+        );
+    }
+
+    const std::uint64_t max_value = parse_max_value(*max_value_text); 
+    PrintingVariant printing_variant;
+
+    if (*printing_text == "A1") {
+        printing_variant = PrintingVariant::Immediate;
+    } else if (*printing_text == "A2") {
+        printing_variant = PrintingVariant::Batch;
+    } else {
+        throw ConfigError(
+            ConfigError::Kind::InvalidConfiguration, 
+            "Printing Variant must be exactly A1 or A2; received '" + 
+            *printing_text + "'."
+        );
+    }
+
+    DivisionScheme division_scheme; 
+
+    if (*division_text == "B1") {
+        division_scheme = DivisionScheme::Range;
+    } else if (*division_text == "B2") {
+        division_scheme = DivisionScheme::Divisibility;
+    } else {
+        throw ConfigError(
+            ConfigError::Kind::InvalidConfiguration, 
+            "Division Scheme must be exactly B1 or B2; received '" +
+            *division_text + "'."
+        );
+    }
+
+    // Optional verbose divisibility logging defaults to false. 
+    const bool verbose_divisibility = verbose_text ? parse_bool(
+        *verbose_text, "Verbose Divisbility"
+    ) : false;
+
+    return Config {
+        static_cast<std::size_t>(parsed_threads), 
+        max_value, 
+        printing_variant, 
+        division_scheme, 
+        verbose_divisibility
+    };
+}
 
 }; // namespace primechecker

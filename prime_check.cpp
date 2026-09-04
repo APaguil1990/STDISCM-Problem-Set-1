@@ -336,6 +336,322 @@ public:
     }
 };
 
+// Persistent worker pool used by the B2 divisor-testing strategy
+class DivisorWorkerPool {
+
+public: 
+    DivisorWorkerPool(std::size_t worker_count, PrintingVariant printing_variant, bool verbose_divisibility, 
+        OutputManager& output) : worker_count_(worker_count), 
+            printing_variant_(printing_variant), 
+            verbose_divisibility_(verbose_divisibility), 
+            output_(output), per_thread_results_(worker_count) {
+            
+        workers_.reserve(worker_count_);
+
+        // B2 workers are created once and reused for every candidate.
+        for (std::size_t thread_id = 0; thread_id < worker_count_; thread_id++) {
+            workers_.emplace_back([this, thread_id] (std::stop_token stop_token) {
+                worker_loop(thread_id, stop_token);
+            });
+        }
+    }
+
+    DivisorWorkerPool(const DivisorWorkerPool&) = delete; 
+    DivisorWorkerPool& operator = (const DivisorWorkerPool&) = delete; 
+    
+    ~DivisorWorkerPool() {
+        shutdown();
+    }
+
+    // Publishes one candidate and waits for all workers to finish its divisor work.
+    void process_candidate(std::uint64_t candidate) {
+        std::unique_lock<std::mutex> lock(state_mutex_); 
+
+        if (worker_error_) {
+            std::rethrow_exception(worker_error_);
+        } 
+
+        candidate_ = candidate;
+        completed_workers_ = 0;
+
+        // Reset early-composite detection for candidate.
+        composite_.store(false, std::memory_order_release);
+        generation_++;
+
+        const std::uint64_t this_generation = generation_;
+
+        // Wake workers without holding the state mutex.
+        lock.unlock();
+        work_cv_.notify_all();
+        lock.lock();
+
+        // Do not move to next candidate until current round is complete.
+        done_cv_.wait(
+            lock, [&] {
+                return completed_generation_ == this_generation || worker_error_ != nullptr;
+        });
+
+        if (worker_error_) {
+            std::rethrow_exception(worker_error_);
+        }
+    }
+
+    // Requests clean termination of every persistent B2 worker. 
+    void shutdown() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_); 
+            stopping_ = true; 
+        } 
+
+        abort_.store(true, std::memory_order_relaxed); 
+
+        for (auto& worker : workers_) {
+            worker.request_stop();
+        } 
+
+        work_cv_.notify_all();
+
+        // Destroying jthreads also joins them safely.
+        workers_.clear();
+    }
+
+    [[nodiscard]] std::uint64_t total_primes() const noexcept {
+        return total_primes_.load(std::memory_order_relaxed);
+    }
+
+    // Merges the A2 worker-local result vectors after computation.
+    [[nodiscard]] std::vector<PrimeResult> take_results() {
+        std::size_t result_count = 0;
+
+        for (const auto& local : per_thread_results_) {
+            result_count += local.size();
+        }
+
+        std::vector<PrimeResult> merged;
+        merged.reserve(result_count); 
+
+        for (auto& local : per_thread_results_) {
+            merged.insert(
+                merged.end(), 
+                std::make_move_iterator(local.begin()), 
+                std::make_move_iterator(local.end())
+            );
+        }
+
+        return merged;
+    }
+
+private:
+    // Persistent worker loop waits for a new candidate generation.
+    void worker_loop(std::size_t thread_id, std::stop_token stop_token) noexcept {
+        try {
+            output_.print_line(worker_prefix(thread_id) + " | B2 persistent worker started"); 
+            std::uint64_t seen_generation = 0;
+
+            while (!stop_token.stop_requested()) {
+                std::uint64_t candidate = 0;
+                std::uint64_t local_generation = 0;
+
+                {
+                    std::unique_lock<std::mutex> lock(state_mutex_);
+
+                    // Sleep until a new candidate is assigned or shutdown begins.
+                    work_cv_.wait(
+                        lock, stop_token, [&] {
+                            return stopping_ || generation_ != seen_generation;
+                    });
+
+                    if (stop_token.stop_requested() || stopping_) {
+                        break;
+                    }
+
+                    candidate = candidate_;
+                    local_generation = generation_;
+                    seen_generation = generation_;
+                }
+
+                // Perform only this worker's divisor lane.
+                perform_divisor_work(candidate, thread_id);
+                bool is_last_worker = false;
+
+                {
+                    std::lock_guard<std::mutex> lock(state_mutex_);
+
+                    if (stopping_) {
+                        break;
+                    } 
+
+                    completed_workers_++;
+
+                    is_last_worker = (completed_workers_ == worker_count_);
+                } 
+
+                if (is_last_worker) {
+                    // No factor found after every lane finished means the candidate is prime.
+                    if (!composite_.load(std::memory_order_acquire) && !abort_.load(std::memory_order_relaxed)) {
+                        PrimeResult result {candidate, std::chrono::system_clock::now(), thread_id};
+                        total_primes_.fetch_add(1, std::memory_order_relaxed);
+
+                        if (printing_variant_ == PrintingVariant::Immediate) {
+                            // A1 prints the prime immediately.
+                            output_.print_prime(result);
+                        } else {
+                            // A2 stores the result in the finalizing worker's local vector.
+                            per_thread_results_[thread_id].push_back(result);
+                        }
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lock(state_mutex_);
+                        completed_generation_ = local_generation;
+                    }
+
+                    // Wake the controller so it can submit the next candidate.
+                    done_cv_.notify_one();
+                }
+            }
+
+            output_.print_line(worker_prefix(thread_id) + " | B2 persistent worker stopped");
+        } catch (...) {
+            // Abort the pool if any worker encounters an exception.
+            abort_.store(true, std::memory_order_relaxed);
+
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+
+                if (!worker_error_) {
+                    worker_error_ = std::current_exception();
+                } 
+
+                stopping_ = true;
+            }
+
+            work_cv_.notify_all();
+            done_cv_.notify_all();
+        }
+    }
+
+    // Tests one worker's share of the divisor sequence for a candidate.
+    void perform_divisor_work(std::uint64_t candidate, std::size_t thread_id) {
+        if (candidate < 2) {
+            mark_composite(candidate, 1, thread_id);
+            return;
+        } 
+
+        // 2 is prime and requires no divisor search.
+        if (candidate == 2) {
+            if (verbose_divisibility_ && thread_id == 0) {
+                output_.print_line(
+                    worker_prefix(thread_id) + " | Candidate: " + std::to_string(candidate) + " | Testing divisor: 2"
+                );
+            }
+
+            return;
+        }
+
+        // Even numbers greater than 2 are composite immediately.
+        if ((candidate % 2) == 0) {
+            if (thread_id == 0) {
+                if (verbose_divisibility_) {
+                    output_.print_line(
+                        worker_prefix(thread_id) + " | Candidate: " + 
+                        std::to_string(candidate) + " | Testing divisor: 2");
+                }
+
+                mark_composite(candidate, 2, thread_id);
+            }
+
+            return;
+        }
+
+        // Each B2 worker receives a different lane of odd divisors. 
+        const std::uint64_t first_divisor = 3 + 2 * static_cast<std::uint64_t>(thread_id);
+        const std::uint64_t step = 2 * static_cast<std::uint64_t>(worker_count_);
+
+        // This worker has no useful divsor if first value exceeds sqrt(candidate).
+        if (first_divisor > candidate / first_divisor) {
+            return;
+        }
+
+        if (verbose_divisibility_) {
+            std::ostringstream line;
+
+            line << worker_prefix(thread_id) << " | Candidate: " << candidate 
+                 << " | Checking odd divisors from " << first_divisor << " with stride " 
+                 << step << " (while d <= n/d)";
+
+            output_.print_line(line.str());
+        } 
+
+        for (std::uint64_t divisor = first_divisor; divisor <= candidate / divisor; /*divisor increment below*/) {
+            // Stop early if another worker already discovered a factor.
+            if (composite_.load(std::memory_order_acquire) || abort_.load(std::memory_order_relaxed)) {
+                break;
+            } 
+
+            if ((candidate % divisor) == 0) {
+                mark_composite(candidate, divisor, thread_id); 
+                break;
+            }
+
+            // Guard the divisor increment against uint64_t overflow.
+            if (divisor > std::numeric_limits<std::uint64_t>::max() - step) {
+                break;
+            }
+
+            divisor += step;
+        }
+    }
+
+    // Atomically records the first factor discovered for a candidate. 
+    void mark_composite(std::uint64_t candidate, std::uint64_t factor, std::size_t thread_id) {
+        bool expected = false; 
+
+        if (composite_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            if (verbose_divisibility_) {
+                std::ostringstream line; 
+
+                line << worker_prefix(thread_id) << " | Candidate: " << candidate 
+                     << " | Factor found: " << factor << " | Canceling remaining divisor checks";
+
+                output_.print_line(line.str());
+            }
+        }
+    }
+
+    const std::size_t worker_count_; 
+    const PrintingVariant printing_variant_;
+    const bool verbose_divisibility_;
+
+    OutputManager& output_;
+
+    // Per-thread A2 storage avoids a shared result-vector mutex. 
+    std::vector<std::vector<PrimeResult>> per_thread_results_;
+    std::atomic<std::uint64_t> total_primes_{0};
+
+    // Atomics provide low-cost early cancellation during divisor testing. 
+    std::atomic<bool> composite_{false};
+    std::atomic<bool> abort_{false};
+
+    // These members coordinate reusable B2 candidate rounds. 
+    std::mutex state_mutex_;
+    std::condition_variable_any work_cv_;
+    std::condition_variable done_cv_;
+
+    std::uint64_t candidate_ = 0;
+    std::uint64_t generation_ = 0;
+    std::uint64_t completed_generation_ = 0;
+
+    std::size_t completed_workers_ = 0;
+
+    bool stopping_ = false; 
+
+    std::exception_ptr worker_error_;
+    
+    // Declared last so worker threads are cleaned up safely during destruction.
+    std::vector<std::jthread> workers_;
+};
+
 }; // namespace
 
 }; // namespace primechecker

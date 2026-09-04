@@ -652,6 +652,88 @@ private:
     std::vector<std::jthread> workers_;
 };
 
+// Implements B2 by parallelizing divisor checks for each candidate.
+class DivisibilityDivisionStrategy final : public WorkDivisionStrategy {
+
+public:
+    RunStatistics run(const Config& config, OutputManager& output) override {
+        RunStatistics statistics;
+        statistics.active_workers = useful_b2_workers(config);
+
+        if (statistics.active_workers < config.requested_threads) {
+            const std::uint64_t root = integer_sqrt(config.max_value);
+            const std::uint64_t odd_slots = (root < 3) ? 0 : ((root - 3) / 2 + 1);
+            std::ostringstream message;
+
+            message << "B2 active workers capped at" << statistics.active_workers
+                    << " (requested " << config.requested_threads << "). ";
+                
+            if (odd_slots == 0) {
+                message << "No odd divisor positions exist up to sqrt(Max Value), "
+                            "so one worker handles special cases.";
+            } else {
+                message << "At most " << odd_slots 
+                        << " odd divisor lanes can be useful up to sqrt(Max Value).";
+            }
+
+            output.print_line(message.str());
+        } 
+
+        // Avoid expensive synchronized rounds for obvious even composites. 
+        output.print_line(
+            "B2 pre-check: even candidates greater than 2 are rejected before "
+            "parallel divisor rounds."
+        );
+
+        if (config.verbose_divisibility) {
+            output.print_line(
+                "Warning: Verbose B2 divisibility logging is enabled; "
+                "console I/O will substantially distort benchmark timing."
+            );
+        }
+
+        const auto computation_start = std::chrono::steady_clock::now();
+
+        // One persistent pool handles all B2 candidate rounds. 
+        DivisorWorkerPool pool(
+            statistics.active_workers, 
+            config.printing_variant, 
+            config.verbose_divisibility, 
+            output
+        );
+
+        // process the special-case prime 2.
+        pool.process_candidate(2); 
+
+        // Only odd candidates require parallel odd-divisor testing. 
+        if (config.max_value >= 3) {
+            for (std::uint64_t candidate = 3;;) {
+                pool.process_candidate(candidate); 
+
+                // Stop before adding 2 would exceed the configured maximum.
+                if (candidate >= config.max_value - 1) {
+                    break;
+                }
+
+                candidate += 2;
+            }
+        }
+
+        // Stop and join all persistent workers before collecting results. 
+        pool.shutdown();
+
+        const auto computation_end = std::chrono::steady_clock::now();
+        statistics.computation_time = computation_end - computation_start;
+        statistics.total_primes = pool.total_primes();
+
+        if (config.printing_variant == PrintingVariant::Batch) {
+            statistics.batch_results = pool.take_results();
+        }
+
+        return statistics;
+    }
+};
+
 }; // namespace
 
 }; // namespace primechecker

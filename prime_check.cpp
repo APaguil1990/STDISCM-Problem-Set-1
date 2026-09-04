@@ -955,6 +955,74 @@ Config ConfigLoader::load_from_file(const std::string& filename) {
         division_scheme, 
         verbose_divisibility
     };
+} 
+
+// Sequential primality test used by the B1 candidate-range strategy.
+bool is_prime_sequential(std::uint64_t n) {
+    if (n < 2) {
+        return false;
+    } 
+
+    if (n == 2) {
+        return true;
+    } 
+
+    if ((n % 2) == 0) {
+        return false;
+    } 
+
+    // d <= n/d avoids floating-point sqrt and multiplication overflow. 
+    for (std::uint64_t divisor = 3; divisor <= n / divisor; divisor += 2) {
+        if ((n % divisor) == 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// Formats wall-clock timestamps using platform-specific thread-safe local time APIs, 
+std::string format_timestamp(const std::chrono::system_clock::time_point& time_point) {
+    const std::time_t raw_time = std::chrono::system_clock::to_time_t(time_point);
+    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+        time_point.time_since_epoch()
+    ) % 1000;
+
+    std::tm local_tm{};
+
+#if defined(_WIN32) 
+    if (localtime_s(&local_tm, &raw_time) != 0) {
+        return "<timestamp unavailable>";
+    }
+
+#else 
+    if (localtime_r(&raw_time, &local_tm) == nullptr) {
+        return "<timestamp unavailable>";
+    }
+
+#endif 
+    std::ostringstream out; 
+
+    out << std::put_time(&local_tm, "%Y-%m-%d %H:%M:%S") << '.'
+        << std::setfill('0') << std::setw(3) << milliseconds.count(); 
+    
+    return out.str();
+}
+
+// Serializes complete console lines so output from workers cannot interleave. 
+void OutputManager::print_line(const std::string& line) {
+    std::lock_guard<std::mutex> lock(console_mutex_);
+    std::cout << line << '\n';
+} 
+
+// Formats and prints one prime result using its logical worker ID. 
+void OutputManager::print_prime(const PrimeResult& result) {
+    std::ostringstream line; 
+
+    line << worker_prefix(result.thread_id) << " | Prime: " << std::setw(8) 
+         << result.prime << " | Time: " << format_timestamp(result.timestamp);
+
+    print_line(line.str());
 }
 
 }; // namespace primechecker

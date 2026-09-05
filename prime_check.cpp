@@ -1025,4 +1025,55 @@ void OutputManager::print_prime(const PrimeResult& result) {
     print_line(line.str());
 }
 
+// Coordinates the selected strategym result output, and benchmark timing. 
+int PrimeCheckerApp::run(const Config& config) {
+    const auto program_wall_start = std::chrono::system_clock::now();
+    const auto program_steady_start = std::chrono::steady_clock::now();
+
+    output_.print_line("=== Multithreading Prime Number Checker ==="); 
+    output_.print_line("Selected variant: " + config.variant_name()); 
+    output_.print_line("Requested worker threads: " + std::to_string(config.requested_threads)); 
+    output_.print_line("Maximum value: " + std::to_string(config.max_value)); 
+    output_.print_line(std::string("Verbose divisibility logging: ") + (config.verbose_divisibility ? "true" : "false"));
+    output_.print_line("Program started at: " + format_timestamp(program_wall_start)); 
+
+    // OOP strategy selection keeps B1 and B2 behind the same interface. 
+    auto strategy = make_strategy(config.division_scheme);
+    RunStatistics statistics = strategy->run(config, output_);
+
+    if (config.printing_variant == PrintingVariant::Batch) {
+        // A2 printing happens aafter the measure computation interval. 
+        std::sort(
+            statistics.batch_results.begin(), 
+            statistics.batch_results.end(), 
+            [] (const PrimeResult& left, const PrimeResult& right) {
+                return left.prime < right.prime;
+            }
+        );
+
+        output_.print_line("=== Batch Results ==="); 
+
+        for (const auto& result : statistics.batch_results) {
+            output_.print_prime(result);
+        }
+    }
+
+    const auto program_wall_end = std::chrono::system_clock::now();
+    const auto program_steady_end = std::chrono::steady_clock::now(); 
+    
+    output_.print_line("Total primes found: " + std::to_string(statistics.total_primes)); 
+    output_.print_line("Active worker threads: " + std::to_string(statistics.active_workers)); 
+    output_.print_line("Prime computation time: " + duration_text(statistics.computation_time)); 
+    output_.print_line("Total program time: " + duration_text(program_steady_end - program_steady_start));
+    output_.print_line("Progam finished at: " + format_timestamp(program_wall_end));
+    
+    if (config.printing_variant == PrintingVariant::Immediate) {
+        output_.print_line("A1 note: immediate synchronized console printing is part of the measure workload.");
+    } else {
+        output_.print_line("A2 note: batch result printing is excluded from prime-computation time but included in total program time.");
+    }
+
+    return 0; 
+}
+
 }; // namespace primechecker

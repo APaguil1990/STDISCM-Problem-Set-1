@@ -2,3 +2,4 @@ Threads = 20
 Max Value = 2^8
 Printing Variant = A1
 Division Scheme = B1
+Verbose Divisibility = true

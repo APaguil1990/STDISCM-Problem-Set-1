@@ -79,6 +79,20 @@ Once one worker proves that the candidate is composite, the other workers stop u
 
 The cancellation is cooperative, so another worker may already have started or printed its activity before observing the cancellation request.
 
+### A1 - Immediate Printing
+
+A1 prints a prime immediately when it is discovered.
+
+Example:
+
+```text
+Thread  2 | Prime:       79 | Time: 2026-09-06 10:45:46.340
+```
+
+Console output is protected by a mutex so multiple workers cannot corrupt or interleave individual output lines.
+
+Because printing happens during computation, console I/O and mutex contention are intentionally part of the A1 workload.
+
 ### A2 - Batch Printing
 
 A2 avoids printing primes during the main computation.
